@@ -1,0 +1,318 @@
+<!-- templates/index.html (修正版) -->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>画像検索エンジン</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .search-box { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .tag-input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 10px; }
+        .search-btn, .debug-btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin-right: 10px; }
+        .debug-btn { background: #28a745; }
+        .search-btn:hover { background: #0056b3; }
+        .debug-btn:hover { background: #218838; }
+        .results { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; }
+        .image-card { background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .image-card img { width: 100%; height: 200px; object-fit: contain; background-color: #f8f9fa; cursor: pointer; }
+        .image-info { padding: 10px; }
+        .image-filename { font-size: 12px; color: #666; margin-bottom: 5px; }
+        .match-score { font-size: 11px; color: #999; }
+        .loading { text-align: center; padding: 40px; }
+        .error { color: #dc3545; padding: 10px; background: #f8d7da; border-radius: 4px; margin-bottom: 20px; }
+        .debug-info { background: #e9ecef; padding: 15px; border-radius: 4px; margin-bottom: 20px; font-family: monospace; font-size: 12px; }
+        .tag-suggestions { position: absolute; background: white; border: 1px solid #ddd; border-top: none; max-height: 200px; overflow-y: auto; width: 100%; z-index: 1000; }
+        .tag-suggestion { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #eee; }
+        .tag-suggestion:hover { background: #f8f9fa; }
+        .input-container { position: relative; }
+        
+        /* モーダル関連のスタイル */
+        .modal { display: none; position: fixed; z-index: 2000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); }
+        .modal-content { position: relative; margin: 2% auto; padding: 20px; width: 90%; max-width: 1000px; background-color: white; border-radius: 8px; max-height: 90vh; overflow-y: auto; }
+        .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; line-height: 1; }
+        .close:hover, .close:focus { color: black; }
+        .modal-image { width: 100%; max-height: 70vh; object-fit: contain; background-color: #f8f9fa; }
+        .modal-info { margin-top: 20px; }
+        .modal-filename { font-size: 18px; font-weight: bold; margin-bottom: 10px; }
+        .modal-tags { margin-top: 15px; }
+        .tag-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+        .tag-item { background-color: #e9ecef; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+        .tag-item.high-confidence { background-color: #d4edda; }
+        .tag-item.medium-confidence { background-color: #fff3cd; }
+        .tag-item.low-confidence { background-color: #f8d7da; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>画像検索エンジン</h1>
+        
+        <div class="search-box">
+            <div class="input-container">
+                <input type="text" class="tag-input" id="positive-tags" 
+                       placeholder="検索したいタグをカンマ区切りで入力 (例: girl, smile, blue eyes)">
+                <div id="positive-suggestions" class="tag-suggestions" style="display: none;"></div>
+            </div>
+            
+            <div class="input-container">
+                <input type="text" class="tag-input" id="negative-tags" 
+                       placeholder="除外したいタグをカンマ区切りで入力 (例: dark, sad)">
+                <div id="negative-suggestions" class="tag-suggestions" style="display: none;"></div>
+            </div>
+            
+            <button class="search-btn" onclick="searchImages()">検索</button>
+            <button class="debug-btn" onclick="showDebugInfo()">dbg</button>
+        </div>
+        
+        <div id="debug-info" class="debug-info" style="display: none;"></div>
+        <div id="error-message" class="error" style="display: none;"></div>
+        <div id="loading" class="loading" style="display: none;">検索中...</div>
+        <div id="results" class="results"></div>
+    </div>
+
+    <!-- 画像拡大モーダル -->
+    <div id="imageModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeImageModal()">&times;</span>
+            <img id="modalImage" class="modal-image" src="" alt="">
+            <div class="modal-info">
+                <div id="modalFilename" class="modal-filename"></div>
+                <div class="modal-tags">
+                    <h4>タグ:</h4>
+                    <div id="modalTags" class="tag-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let searchTimeout;
+
+        // デバッグ情報を表示
+        function showDebugInfo() {
+            fetch('/api/debug/stats')
+                .then(response => response.json())
+                .then(data => {
+                    const debugDiv = document.getElementById('debug-info');
+                    debugDiv.innerHTML = `
+                        <h3>データベース統計:</h3>
+                        <p>画像数: ${data.image_count}</p>
+                        <p>タグ数: ${data.tag_count}</p>
+                        <p>関連数: ${data.relation_count}</p>
+                        <h4>人気タグ:</h4>
+                        <ul>
+                            ${data.popular_tags.slice(0, 10).map(tag => `<li>${tag.tag} (${tag.count}回)</li>`).join('')}
+                        </ul>
+                    `;
+                    debugDiv.style.display = 'block';
+                })
+                .catch(error => {
+                    console.error('デバッグ情報の取得に失敗:', error);
+                });
+        }
+
+        // タグ入力の自動補完
+        function setupAutoComplete(inputId, suggestionsId) {
+            const input = document.getElementById(inputId);
+            const suggestions = document.getElementById(suggestionsId);
+
+            input.addEventListener('input', function() {
+                clearTimeout(searchTimeout);
+                const query = this.value.split(',').pop().trim();
+                
+                if (query.length < 2) {
+                    suggestions.style.display = 'none';
+                    return;
+                }
+
+                searchTimeout = setTimeout(() => {
+                    fetch(`/api/tags/suggestions?q=${encodeURIComponent(query)}`)
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.length > 0) {
+                                suggestions.innerHTML = data.map(item => 
+                                    `<div class="tag-suggestion" onclick="selectTag('${inputId}', '${item.tag}')">${item.tag} (${item.count})</div>`
+                                ).join('');
+                                suggestions.style.display = 'block';
+                            } else {
+                                suggestions.style.display = 'none';
+                            }
+                        })
+                        .catch(error => console.error('タグ候補取得エラー:', error));
+                }, 300);
+            });
+
+            document.addEventListener('click', function(e) {
+                if (!input.contains(e.target) && !suggestions.contains(e.target)) {
+                    suggestions.style.display = 'none';
+                }
+            });
+        }
+
+        function selectTag(inputId, tag) {
+            const input = document.getElementById(inputId);
+            const values = input.value.split(',');
+            values[values.length - 1] = ' ' + tag;
+            input.value = values.join(',');
+            
+            if (inputId === 'positive-tags') {
+                document.getElementById('positive-suggestions').style.display = 'none';
+            } else {
+                document.getElementById('negative-suggestions').style.display = 'none';
+            }
+        }
+
+        function searchImages() {
+            const positiveTags = document.getElementById('positive-tags').value
+                .split(',').map(tag => tag.trim()).filter(tag => tag);
+            const negativeTags = document.getElementById('negative-tags').value
+                .split(',').map(tag => tag.trim()).filter(tag => tag);
+
+            console.log('検索開始:', { positiveTags, negativeTags });
+
+            if (positiveTags.length === 0) {
+                showError('少なくとも1つの検索タグを入力してください。');
+                return;
+            }
+
+            hideError();
+            showLoading(true);
+
+            fetch('/api/search', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    positive_tags: positiveTags,
+                    negative_tags: negativeTags,
+                    limit: 100
+                })
+            })
+            .then(response => {
+                console.log('レスポンス受信:', response.status);
+                return response.json();
+            })
+            .then(data => {
+                console.log('検索結果:', data);
+                showLoading(false);
+                if (data.error) {
+                    showError(data.error);
+                } else {
+                    displayResults(data.results);
+                }
+            })
+            .catch(error => {
+                console.error('検索エラー:', error);
+                showLoading(false);
+                showError('検索中にエラーが発生しました: ' + error.message);
+            });
+        }
+
+        function displayResults(results) {
+            const resultsContainer = document.getElementById('results');
+            
+            console.log(`${results.length}件の検索結果を表示`);
+            
+            if (results.length === 0) {
+                resultsContainer.innerHTML = '<p>検索結果が見つかりませんでした。デバッグ情報を確認してください。</p>';
+                return;
+            }
+
+            resultsContainer.innerHTML = results.map(image => `
+                <div class="image-card">
+                    <img src="/api/image/${image.id}" alt="${image.filename}" loading="lazy"
+                         onclick="openImageModal(${image.id}, '${image.filename}')"
+                         onerror="this.style.display='none'; this.nextElementSibling.innerHTML='<p>画像読み込みエラー</p>'">
+                    <div class="image-info">
+                        <div class="image-filename">${image.filename}</div>
+                        <div class="match-score">マッチ度: ${image.match_count}</div>
+                        <div class="match-score">ファイル存在: ${image.file_exists ? '✓' : '✗'}</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+
+        function hideError() {
+            document.getElementById('error-message').style.display = 'none';
+        }
+
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            setupAutoComplete('positive-tags', 'positive-suggestions');
+            setupAutoComplete('negative-tags', 'negative-suggestions');
+            
+            document.getElementById('positive-tags').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') searchImages();
+            });
+            document.getElementById('negative-tags').addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') searchImages();
+            });
+        });
+
+        // 画像モーダル関連の関数
+        function openImageModal(imageId, filename) {
+            const modal = document.getElementById('imageModal');
+            const modalImage = document.getElementById('modalImage');
+            const modalFilename = document.getElementById('modalFilename');
+            const modalTags = document.getElementById('modalTags');
+
+            // 画像を設定
+            modalImage.src = `/api/image/${imageId}`;
+            modalFilename.textContent = filename;
+            
+            // タグ情報を取得
+            fetch(`/api/image/${imageId}/tags`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.tags && data.tags.length > 0) {
+                        modalTags.innerHTML = data.tags.map(tag => {
+                            let confidenceClass = 'low-confidence';
+                            if (tag.confidence > 0.7) confidenceClass = 'high-confidence';
+                            else if (tag.confidence > 0.4) confidenceClass = 'medium-confidence';
+                            
+                            return `<span class="tag-item ${confidenceClass}" title="信頼度: ${(tag.confidence * 100).toFixed(1)}%">${tag.tag}</span>`;
+                        }).join('');
+                    } else {
+                        modalTags.innerHTML = '<span class="tag-item">タグが見つかりません</span>';
+                    }
+                })
+                .catch(error => {
+                    console.error('タグ取得エラー:', error);
+                    modalTags.innerHTML = '<span class="tag-item">タグの読み込みに失敗しました</span>';
+                });
+
+            modal.style.display = 'block';
+        }
+
+        function closeImageModal() {
+            document.getElementById('imageModal').style.display = 'none';
+        }
+
+        // モーダル外をクリックしたら閉じる
+        window.onclick = function(event) {
+            const modal = document.getElementById('imageModal');
+            if (event.target === modal) {
+                closeImageModal();
+            }
+        }
+
+        // ESCキーでモーダルを閉じる
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeImageModal();
+            }
+        });
+    </script>
+</body>
+</html>
