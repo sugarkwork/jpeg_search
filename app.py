@@ -1,6 +1,7 @@
 # app.py (修正版)
 from flask import Flask, render_template, request, jsonify, send_file
 import os
+import time
 from database import ImageDatabase
 import traceback
 
@@ -86,22 +87,35 @@ def index():
 @app.route('/api/search', methods=['POST'])
 def search_images():
     try:
+        # 全体の処理時間を測定開始
+        total_start_time = time.time()
+        
         data = request.json
         print(f"Received search request: {data}")
 
+        # クエリ構築の時間を測定
+        query_build_start = time.time()
         positive_tag_build, negative_tag_build = build_query(data.get('positive_tags', []))
         
         positive_tags = list(set([tag.strip().lower() for tag in data.get('positive_tags', []) if tag.strip()] + positive_tag_build))
         negative_tags = list(set([tag.strip().lower() for tag in data.get('negative_tags', []) if tag.strip()] + negative_tag_build))
         limit = data.get('limit', 50)
+        query_build_time = time.time() - query_build_start
         
         print(f"Processed tags - Positive: {positive_tags}, Negative: {negative_tags}")
+        print(f"クエリ構築時間: {query_build_time:.4f}秒")
         
         if not positive_tags:
             return jsonify({'error': 'At least one positive tag is required'}), 400
         
+        # データベース検索の時間を測定
+        db_search_start = time.time()
         results = db.search_images(positive_tags, negative_tags, limit)
+        db_search_time = time.time() - db_search_start
+        print(f"データベース検索時間: {db_search_time:.4f}秒")
         
+        # レスポンス構築の時間を測定
+        response_build_start = time.time()
         response_data = []
         for image_id, filepath, filename, match_count in results:
             # ファイルの存在確認
@@ -113,8 +127,15 @@ def search_images():
                 'match_count': match_count,
                 'file_exists': file_exists
             })
+        response_build_time = time.time() - response_build_start
         
-        print(f"Returning {len(response_data)} results")
+        # 全体の処理時間を計算
+        total_time = time.time() - total_start_time
+        
+        print(f"レスポンス構築時間: {response_build_time:.4f}秒")
+        print(f"検索結果数: {len(response_data)}件")
+        print(f"全体処理時間: {total_time:.4f}秒")
+        print(f"時間内訳 - クエリ構築: {query_build_time:.4f}秒, DB検索: {db_search_time:.4f}秒, レスポンス構築: {response_build_time:.4f}秒")
         
         return jsonify({
             'results': response_data,
@@ -122,6 +143,12 @@ def search_images():
             'query': {
                 'positive_tags': positive_tags,
                 'negative_tags': negative_tags
+            },
+            'performance': {
+                'total_time': total_time,
+                'query_build_time': query_build_time,
+                'db_search_time': db_search_time,
+                'response_build_time': response_build_time
             }
         })
         

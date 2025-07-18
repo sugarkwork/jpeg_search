@@ -1,12 +1,14 @@
 # database.py (修正版)
 import sqlite3
 import os
+import time
 from typing import List, Tuple
 
 class ImageDatabase:
     def __init__(self, db_path: str = "image_search.db"):
         self.db_path = db_path
         self.init_database()
+        self.optimize_database()
     
     def get_connection(self):
         return sqlite3.connect(self.db_path)
@@ -47,8 +49,53 @@ class ImageDatabase:
         )
         ''')
         
+        # 既存のインデックスを削除（再構築のため）
+        cursor.execute('DROP INDEX IF EXISTS idx_tags_tag_name')
+        cursor.execute('DROP INDEX IF EXISTS idx_image_tags_image_id')
+        cursor.execute('DROP INDEX IF EXISTS idx_image_tags_tag_id')
+        cursor.execute('DROP INDEX IF EXISTS idx_image_tags_image_tag')
+        
+        # 最適化されたインデックスの作成
+        # tag_nameの検索を高速化（UNIQUE制約で自動的にインデックスが作成されるため、追加のインデックスは不要）
+        # tags.tag_nameには既にUNIQUE制約があるため、これで十分
+        
+        # tag_id → image_id の順で検索するカバーリングインデックス
+        # JOINとグループ化の両方で使用される
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_it_tagid_imageid 
+        ON image_tags(tag_id, image_id)
+        ''')
+        
+        # NOT EXISTS句でimage_idだけを探す場合に使用
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_it_imageid 
+        ON image_tags(image_id)
+        ''')
+        
         conn.commit()
         conn.close()
+    
+    def optimize_database(self):
+        """データベースの最適化を実行"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            print("データベースの最適化を開始...")
+            
+            # 統計情報を更新
+            cursor.execute('ANALYZE')
+            
+            # SQLiteの最適化を実行
+            cursor.execute('PRAGMA optimize')
+            
+            conn.commit()
+            print("データベースの最適化が完了しました")
+            
+        except Exception as e:
+            print(f"データベース最適化中にエラーが発生しました: {e}")
+        finally:
+            conn.close()
     
     def add_image_with_tags(self, filepath: str, tags: List[str]):
         """画像とそのタグをデータベースに追加"""
@@ -111,21 +158,31 @@ class ImageDatabase:
     
     def search_images(self, positive_tags: List[str], negative_tags: List[str] = None, limit: int = 50):
         """タグで画像を検索（デバッグ機能付き）"""
+        search_start_time = time.time()
+        
         if negative_tags is None:
             negative_tags = []
             
         # タグを小文字に統一
+        tag_normalize_start = time.time()
         positive_tags = [tag.lower().strip() for tag in positive_tags if tag.strip()]
         negative_tags = [tag.lower().strip() for tag in negative_tags if tag.strip()]
+        tag_normalize_time = time.time() - tag_normalize_start
         
         print(f"Searching for positive tags: {positive_tags}")
         print(f"Excluding negative tags: {negative_tags}")
+        print(f"タグ正規化時間: {tag_normalize_time:.4f}秒")
         
+        # データベース接続時間を測定
+        db_connect_start = time.time()
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
+        db_connect_time = time.time() - db_connect_start
+        print(f"DB接続時間: {db_connect_time:.4f}秒")
         
         try:
-            # まず、データベース内の総数をチェック
+            # 統計情報取得時間を測定
+            stats_start = time.time()
             cursor.execute('SELECT COUNT(*) FROM images')
             total_images = cursor.fetchone()[0]
             print(f"Total images in database: {total_images}")
@@ -133,14 +190,20 @@ class ImageDatabase:
             cursor.execute('SELECT COUNT(*) FROM tags')
             total_tags = cursor.fetchone()[0]
             print(f"Total tags in database: {total_tags}")
+            stats_time = time.time() - stats_start
+            print(f"統計情報取得時間: {stats_time:.4f}秒")
             
-            # 検索対象のタグが存在するかチェック
+            # タグ存在確認時間を測定
+            tag_check_start = time.time()
             for tag in positive_tags:
                 cursor.execute('SELECT COUNT(*) FROM tags WHERE tag_name = ?', (tag,))
                 count = cursor.fetchone()[0]
                 print(f"Tag '{tag}' found {count} times")
+            tag_check_time = time.time() - tag_check_start
+            print(f"タグ存在確認時間: {tag_check_time:.4f}秒")
             
-            # ポジティブタグのクエリ
+            # クエリ構築時間を測定
+            query_build_start = time.time()
             positive_placeholders = ','.join(['?' for _ in positive_tags])
             
             query = f'''
@@ -157,11 +220,11 @@ class ImageDatabase:
             if negative_tags:
                 negative_placeholders = ','.join(['?' for _ in negative_tags])
                 query += f'''
-                AND i.id NOT IN (
-                    SELECT i2.id FROM images i2
-                    JOIN image_tags it2 ON i2.id = it2.image_id
+                AND NOT EXISTS (
+                    SELECT 1 FROM image_tags it2
                     JOIN tags t2 ON it2.tag_id = t2.id
-                    WHERE t2.tag_name IN ({negative_placeholders})
+                    WHERE it2.image_id = i.id
+                    AND t2.tag_name IN ({negative_placeholders})
                 )
                 '''
                 params.extend(negative_tags)
@@ -172,14 +235,26 @@ class ImageDatabase:
             LIMIT ?
             '''
             params.append(limit)
+            query_build_time = time.time() - query_build_start
+            print(f"クエリ構築時間: {query_build_time:.4f}秒")
             
             print(f"Executing query: {query}")
             print(f"With parameters: {params}")
             
+            # SQLクエリ実行時間を測定
+            sql_execute_start = time.time()
             cursor.execute(query, params)
             results = cursor.fetchall()
+            sql_execute_time = time.time() - sql_execute_start
             
+            # 全体の検索時間を計算
+            total_search_time = time.time() - search_start_time
+            
+            print(f"SQLクエリ実行時間: {sql_execute_time:.4f}秒")
             print(f"Search returned {len(results)} results")
+            print(f"データベース検索全体時間: {total_search_time:.4f}秒")
+            print(f"DB検索時間内訳 - タグ正規化: {tag_normalize_time:.4f}秒, DB接続: {db_connect_time:.4f}秒, 統計取得: {stats_time:.4f}秒, タグ確認: {tag_check_time:.4f}秒, クエリ構築: {query_build_time:.4f}秒, SQL実行: {sql_execute_time:.4f}秒")
+            
             for result in results[:3]:  # 最初の3件をログ出力
                 print(f"Result: {result}")
             

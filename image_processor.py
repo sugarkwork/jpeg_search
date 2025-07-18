@@ -48,8 +48,10 @@ class ImageProcessor:
             batch = image_files[i:i + batch_size]
             
             try:
+                percent = int(i / len(image_files) * 100)
+
                 # タグ化実行
-                print(f"Processing batch {i//batch_size + 1}/{(len(image_files) + batch_size - 1)//batch_size}")
+                print(f"Processing batch {i//batch_size + 1}/{(len(image_files) + batch_size - 1)//batch_size} ({percent}%)")
                 tags_list = self.tag_method(batch)
 
                 print("tags_list", tags_list)
